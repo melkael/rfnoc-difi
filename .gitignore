@@ -1,0 +1,8 @@
+build*/
+xsim_proj/
+*.log
+*.jou
+*.pb
+*.wdb
+*.veo
+*.vho
