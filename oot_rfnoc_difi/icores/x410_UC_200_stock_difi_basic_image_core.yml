@@ -1,0 +1,198 @@
+# Stock-faithful DIFI image: byte-for-byte the stock x410_UC_200 image core
+# from uhd-4.8 (fpga/usrp3/top/x400/x410_UC_200_rfnoc_image_core.yml), with
+# exactly one functional change: the difi_basic block is spliced into the
+# RF A:0 RX path (radio0 -> ddc0 -> difi0 -> ep0).
+# The stock file's `inherit` includes (x410_radio_base.yml, x4xx_uc_base.yml)
+# are inlined below because the image builder cannot resolve yaml_include
+# paths for out-of-tree image cores.
+# -----------------------------------------
+schema: rfnoc_imagebuilder_args          # Identifier for the schema used to validate this file
+copyright: >-                            # Copyright information used in file headers
+  Ettus Research, A National Instruments Brand
+license: >-                              # License information used in file headers
+  SPDX-License-Identifier: LGPL-3.0-or-later
+version: '1.0'                           # File version
+chdr_width: 256                          # Bit width of the CHDR bus for this image
+device: 'x410'                           # USRP type
+image_core_name: 'usrp_x410_fpga_UC_200_SDIFI' # Name to use for the generated output files
+default_target: 'X410'                   # Default make target
+
+parameters:
+  RF_BW: 200
+  ENABLE_DRAM: True
+  NUM_DRAM_BANKS: 1
+  NUM_DRAM_CHANS: 4
+  DRAM_WIDTH: 64
+
+# Transport adapters (inlined from yaml_include/x4xx_uc_base.yml)
+transport_adapters:
+  eth_qsfp1:
+    block_desc : 'x4xx_eth.yml'
+    parameters:
+      port_type0: 5
+      port_type1: 0
+      port_type2: 0
+      port_type3: 0
+      qsfp_num: 1
+  dma:
+    block_desc : 'chdr_dma.yml'
+
+# A list of all stream endpoints in design
+# ----------------------------------------
+stream_endpoints:
+  ep0:                                  # Stream endpoint name
+    ctrl: True                          # Endpoint passes control traffic
+    data: True                          # Endpoint passes data traffic
+    buff_size_bytes: 262144             # Ingress buffer size for data
+  ep1:
+    ctrl: False
+    data: True
+    buff_size_bytes: 262144
+  ep2:
+    ctrl: False
+    data: True
+    buff_size_bytes: 262144
+  ep3:
+    ctrl: False
+    data: True
+    buff_size_bytes: 262144
+  ep4:
+    ctrl: False
+    data: True
+    buff_size_bytes: 32768
+  ep5:
+    ctrl: False
+    data: True
+    buff_size_bytes: 32768
+  ep6:
+    ctrl: False
+    data: True
+    buff_size_bytes: 32768
+  ep7:
+    ctrl: False
+    data: True
+    buff_size_bytes: 32768
+
+# A table of which crossbar routes to include
+# -------------------------------------------
+crossbar_routes:
+  #  eth1  ep0   ep2   ep4   ep6
+  #     dma   ep1   ep3   ep5   ep7
+  - [ 1, 0, 1, 1, 1, 1, 1, 1, 1, 1 ] # eth1 (QSFP Port 1)
+  - [ 0, 1, 1, 1, 1, 1, 1, 1, 1, 1 ] # dma
+  - [ 1, 1, 0, 0, 0, 0, 1, 1, 1, 1 ] # ep0  (radio0.0)
+  - [ 1, 1, 0, 0, 0, 0, 1, 1, 1, 1 ] # ep1  (radio0.1)
+  - [ 1, 1, 0, 0, 0, 0, 1, 1, 1, 1 ] # ep2  (radio1.0)
+  - [ 1, 1, 0, 0, 0, 0, 1, 1, 1, 1 ] # ep3  (radio1.1)
+  - [ 1, 1, 1, 1, 1, 1, 0, 0, 0, 0 ] # ep4  (replay0.0)
+  - [ 1, 1, 1, 1, 1, 1, 0, 0, 0, 0 ] # ep5  (replay0.1)
+  - [ 1, 1, 1, 1, 1, 1, 0, 0, 0, 0 ] # ep6  (replay0.2)
+  - [ 1, 1, 1, 1, 1, 1, 0, 0, 0, 0 ] # ep7  (replay0.3)
+
+# A list of all NoC blocks in design
+# ----------------------------------
+block_chdr_width: 64                    # Bit width of the CHDR bus between blocks
+noc_blocks:
+  duc0:                                 # NoC block name
+    block_desc: 'duc.yml'               # Block device descriptor file
+    parameters:
+      NUM_PORTS: 2
+  ddc0:
+    block_desc: 'ddc.yml'
+    parameters:
+      NUM_PORTS: 2
+  radio0:
+    block_desc: 'radio.yml'
+    parameters:
+      NUM_PORTS: 2
+    ctrl_clock: _device_.rfnoc_ctrl
+    timebase_clock: _device_.radio
+  duc1:
+    block_desc: 'duc.yml'
+    parameters:
+      NUM_PORTS: 2
+  ddc1:
+    block_desc: 'ddc.yml'
+    parameters:
+      NUM_PORTS: 2
+  radio1:
+    block_desc: 'radio.yml'
+    parameters:
+      NUM_PORTS: 2
+    ctrl_clock: _device_.rfnoc_ctrl
+    timebase_clock: _device_.radio
+  replay0:
+    block_desc: 'replay.yml'
+    parameters:
+      NUM_PORTS: 4
+      MEM_DATA_W: 64
+      MEM_ADDR_W: 32
+  # The one addition vs stock: the DIFI block
+  difi0:
+    block_desc: 'difi_basic.yml'
+
+# A list of all static connections in design
+# ------------------------------------------
+connections:
+  # RF A:0 TX
+  - { srcblk: ep0,    srcport: out0,  dstblk: duc0,   dstport: in_0 }
+  - { srcblk: duc0,   srcport: out_0, dstblk: radio0, dstport: in_0 }
+  # RF A:0 RX (stock: ddc0 -> ep0; here: ddc0 -> difi0 -> ep0)
+  - { srcblk: radio0, srcport: out_0, dstblk: ddc0,   dstport: in_0 }
+  - { srcblk: ddc0,   srcport: out_0, dstblk: difi0,  dstport: in   }
+  - { srcblk: difi0,  srcport: out,   dstblk: ep0,    dstport: in0  }
+  # RF A:1 TX
+  - { srcblk: ep1,    srcport: out0,  dstblk: duc0,   dstport: in_1 }
+  - { srcblk: duc0,   srcport: out_1, dstblk: radio0, dstport: in_1 }
+  # RF A:1 RX
+  - { srcblk: radio0, srcport: out_1, dstblk: ddc0,   dstport: in_1 }
+  - { srcblk: ddc0,   srcport: out_1, dstblk: ep1,    dstport: in0  }
+  #
+  # RF B:0 TX
+  - { srcblk: ep2,    srcport: out0,  dstblk: duc1,   dstport: in_0 }
+  - { srcblk: duc1,   srcport: out_0, dstblk: radio1, dstport: in_0 }
+  # RF B:0 RX
+  - { srcblk: radio1, srcport: out_0, dstblk: ddc1,   dstport: in_0 }
+  - { srcblk: ddc1,   srcport: out_0, dstblk: ep2,    dstport: in0  }
+  # RF B:1 TX
+  - { srcblk: ep3,    srcport: out0,  dstblk: duc1,   dstport: in_1 }
+  - { srcblk: duc1,   srcport: out_1, dstblk: radio1, dstport: in_1 }
+  # RF B:1 RX
+  - { srcblk: radio1, srcport: out_1, dstblk: ddc1,   dstport: in_1 }
+  - { srcblk: ddc1,   srcport: out_1, dstblk: ep3,    dstport: in0  }
+  #
+  # Replay Connections
+  - { srcblk: ep4,     srcport: out0,  dstblk: replay0, dstport: in_0 }
+  - { srcblk: replay0, srcport: out_0, dstblk: ep4,     dstport: in0  }
+  - { srcblk: ep5,     srcport: out0,  dstblk: replay0, dstport: in_1 }
+  - { srcblk: replay0, srcport: out_1, dstblk: ep5,     dstport: in0  }
+  - { srcblk: ep6,     srcport: out0,  dstblk: replay0, dstport: in_2 }
+  - { srcblk: replay0, srcport: out_2, dstblk: ep6,     dstport: in0  }
+  - { srcblk: ep7,     srcport: out0,  dstblk: replay0, dstport: in_3 }
+  - { srcblk: replay0, srcport: out_3, dstblk: ep7,     dstport: in0  }
+  #
+  # BSP Connections
+  - { srcblk: replay0, srcport: axi_ram, dstblk: _device_, dstport: dram0 }
+  # Radio BSP connections (inlined from yaml_include/x410_radio_base.yml)
+  - { srcblk: radio0,   srcport: ctrlport,    dstblk: _device_, dstport: ctrlport_radio0 }
+  - { srcblk: radio1,   srcport: ctrlport,    dstblk: _device_, dstport: ctrlport_radio1 }
+  - { srcblk: _device_, srcport: radio0,      dstblk: radio0,   dstport: radio           }
+  - { srcblk: _device_, srcport: radio1,      dstblk: radio1,   dstport: radio           }
+  - { srcblk: _device_, srcport: time,        dstblk: radio0,   dstport: time            }
+  - { srcblk: _device_, srcport: time,        dstblk: radio1,   dstport: time            }
+  # Transport BSP connections (inlined from yaml_include/x4xx_uc_base.yml)
+  - { srcblk: eth_qsfp1, srcport: qsfp,       dstblk: _device_, dstport: qsfp1       }
+  - { srcblk: dma,       srcport: chdr_dma_s, dstblk: _device_, dstport: chdr_dma_s  }
+  - { srcblk: _device_,  srcport: chdr_dma_m, dstblk: dma,      dstport: chdr_dma_m  }
+
+# A list of all clock domain connections in design
+# ------------------------------------------------
+clk_domains:
+    - { srcblk: _device_, srcport: ce,       dstblk: duc0,    dstport: ce    }
+    - { srcblk: _device_, srcport: ce,       dstblk: ddc0,    dstport: ce    }
+    - { srcblk: _device_, srcport: ce,       dstblk: duc1,    dstport: ce    }
+    - { srcblk: _device_, srcport: ce,       dstblk: ddc1,    dstport: ce    }
+    - { srcblk: _device_, srcport: dram,     dstblk: replay0, dstport: mem   }
+    # Radio clocks (inlined from yaml_include/x410_radio_base.yml)
+    - { srcblk: _device_, srcport: radio,    dstblk: radio0,  dstport: radio }
+    - { srcblk: _device_, srcport: radio,    dstblk: radio1,  dstport: radio }
