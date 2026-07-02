@@ -8,8 +8,27 @@ license: >-                             # License information used in file heade
 version: '1.0'                          # File version
 chdr_width: 64                          # Bit width of the CHDR bus for this image
 device: 'x410'                          # USRP type
-image_core_name: 'x410_100_DIFI'        # Name to use for the RFNoC Image Core files
-default_target: 'X410_X4_100'           # Default make target
+image_core_name: 'usrp_x410_fpga_X4_100_DIFI'  # Name to use for the RFNoC Image Core files
+default_target: 'X410'                  # Default make target
+
+parameters:
+  RF_BW: 100
+  ENABLE_DRAM: False
+
+# Transport adapters: QSFP0 as 4x10GbE (X4) + CHDR DMA
+# (mirrors uhd-4.8 fpga/usrp3/top/x400/yaml_include/x4xx_x4_base.yml, inlined
+# because the image builder does not resolve yaml_include paths for OOT icores)
+transport_adapters:
+  eth_qsfp0:
+    block_desc : 'x4xx_eth.yml'
+    parameters:
+      port_type0: 2
+      port_type1: 2
+      port_type2: 2
+      port_type3: 2
+      qsfp_num: 0
+  dma:
+    block_desc : 'chdr_dma.yml'
 
 # A list of all stream endpoints in design
 # ----------------------------------------
@@ -18,6 +37,10 @@ stream_endpoints:
     ctrl: True                          # Endpoint passes control traffic
     data: True                          # Endpoint passes data traffic
     buff_size_bytes: 262144             # Ingress buffer size for data
+  ep1:
+    ctrl: False
+    data: True
+    buff_size_bytes: 262144
 
 # A list of all NoC blocks in design
 # ----------------------------------
@@ -25,12 +48,13 @@ noc_blocks:
   radio0:
     block_desc: 'radio.yml'
     parameters:
-      NUM_PORTS: 1
-      NIPC: RADIO_NIPC
+      NUM_PORTS: 2
+    ctrl_clock: _device_.rfnoc_ctrl
+    timebase_clock: _device_.radio
   ddc0:
     block_desc: 'ddc.yml'
     parameters:
-      NUM_PORTS: 1
+      NUM_PORTS: 2
   difi0:
     block_desc: 'difi.yml'
 
@@ -42,24 +66,25 @@ noc_blocks:
 #   - dstblk  = Destination block to connect
 #   - dstport = Port on the destination block to connect
 connections:
-  # RF A:0 TX
+  # RF A:0 TX (direct, no DUC)
   - { srcblk: ep0,    srcport: out0,  dstblk: radio0, dstport: in_0 }
-  # RF A:0 RX
+  # RF A:0 RX: radio -> DDC -> DIFI -> SEP
   - { srcblk: radio0, srcport: out_0, dstblk: ddc0,   dstport: in_0 }
-  - { srcblk: ddc0,   srcport: out_0, dstblk: difi0,    dstport: in  }
-  - { srcblk: difi0,   srcport: out,   dstblk: ep0,    dstport: in0  }
-  # RF A:1 TX
-  # RF A:1 RX
-  #
-  # RF B:0 TX
-  # RF B:0 RX
-  # RF B:1 TX
-  # RF B:1 RX
-  #
+  - { srcblk: ddc0,   srcport: out_0, dstblk: difi0,  dstport: in   }
+  - { srcblk: difi0,  srcport: out,   dstblk: ep0,    dstport: in0  }
+  # RF A:1 TX (direct, no DUC)
+  - { srcblk: ep1,    srcport: out0,  dstblk: radio0, dstport: in_1 }
+  # RF A:1 RX: radio -> DDC -> SEP
+  - { srcblk: radio0, srcport: out_1, dstblk: ddc0,   dstport: in_1 }
+  - { srcblk: ddc0,   srcport: out_1, dstblk: ep1,    dstport: in0  }
   # BSP Connections
-  - { srcblk: radio0,   srcport: ctrlport,    dstblk: _device_, dstport: ctrlport_radio0 }
-  - { srcblk: _device_, srcport: radio0,      dstblk: radio0,   dstport: radio           }
-  - { srcblk: _device_, srcport: time,        dstblk: radio0,   dstport: time            }
+  - { srcblk: radio0,   srcport: ctrlport, dstblk: _device_, dstport: ctrlport_radio0 }
+  - { srcblk: _device_, srcport: radio0,   dstblk: radio0,   dstport: radio           }
+  - { srcblk: _device_, srcport: time,     dstblk: radio0,   dstport: time            }
+  # Transport BSP Connections (from x4xx_x4_base.yml)
+  - { srcblk: eth_qsfp0, srcport: qsfp,       dstblk: _device_, dstport: qsfp0       }
+  - { srcblk: dma,       srcport: chdr_dma_s, dstblk: _device_, dstport: chdr_dma_s  }
+  - { srcblk: _device_,  srcport: chdr_dma_m, dstblk: dma,      dstport: chdr_dma_m  }
 
 # A list of all clock domain connections in design
 # ------------------------------------------------
@@ -69,5 +94,5 @@ connections:
 #   - dstblk  = Destination block to connect
 #   - dstport = Clock domain on the destination block to connect
 clk_domains:
-    - { srcblk: _device_, srcport: radio,    dstblk: radio0,  dstport: radio }
-    - { srcblk: _device_, srcport: radio,    dstblk: ddc0,    dstport: ce    }
+    - { srcblk: _device_, srcport: radio, dstblk: radio0, dstport: radio }
+    - { srcblk: _device_, srcport: ce,    dstblk: ddc0,   dstport: ce    }

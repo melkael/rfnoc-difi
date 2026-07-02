@@ -29,7 +29,7 @@ add_executable(init_difi_block
 target_link_libraries(init_difi_block
     ${UHD_LIBRARIES}
     ${Boost_LIBRARIES}
-    difipack
+    ${DIFIPACK_LIBRARY}
     -Wl,--no-as-needed
     rfnoc-difi
 )

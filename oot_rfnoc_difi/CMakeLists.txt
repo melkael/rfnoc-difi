@@ -170,7 +170,7 @@ endif(NOT CMAKE_MODULES_DIR)
 # Subdirectories
 ########################################################################
 if(UHD_FPGA_DIR)
-    add_subdirectory(blocks)
+    add_subdirectory(rfnoc/blocks)
     add_subdirectory(fpga)
     add_subdirectory(icores)
 endif()

@@ -6,3 +6,4 @@ xsim_proj/
 *.wdb
 *.veo
 *.vho
+oot_rfnoc_difi/fpga/ip/*/*.xml

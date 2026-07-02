@@ -6,7 +6,7 @@ rfnoc-difi is an OOT RFNoC block project that allows the x410 to output DIFI pac
 
 - `oot_rfnoc_difi` is an out-of-tree RFNoC block that switches the stream from CHDR to DIFI format.
 
-You will also need to use the development branch of UHD that allows for the separation of control and data streams, which Ettus should be publishing soon, if it's not already, link TBD. 
+This project targets stock UHD 4.8 (tag `v4.8.0.0`). No special UHD branch is required: the control/data stream separation this project relies on has been part of mainline RFNoC since UHD 4.0.
 
 ## Getting Started
 
@@ -16,11 +16,11 @@ There is a ton of Verilog and SystemVerilog within the FPGA design. It is highly
 
 ### Vivado Setup
 
-It is necessary to download Vivado and get a valid license. Make sure to get Vivado 2019.1, with the 2019.1.1 patch and the AR73068 patch.
+It is necessary to download Vivado and get a valid license. For X410 FPGA builds with UHD 4.x, you need Vivado ML Enterprise 2021.1 with the AR76780 patch (this is what UHD's `setupenv.sh` checks for).
 
-[Vivado 2019.1 and 2019.1 Patch 1 (2019.1.1) downloads](https://www.xilinx.com/support/download/index.html/content/xilinx/en/downloadNav/vivado-design-tools/archive.html)
+[Vivado 2021.1 downloads (archive)](https://www.xilinx.com/support/download/index.html/content/xilinx/en/downloadNav/vivado-design-tools/archive.html)
 
-[Vivado AR73068 patch download](https://support.xilinx.com/s/article/73068?language=en_US)
+[Vivado AR76780 patch download](https://support.xilinx.com/s/article/76780?language=en_US) (extract the zip into `<Vivado install>/2021.1/patches/AR76780/`; `vivado -version` should then report `2021.1_AR76780`)
 
 If you're on Linux, you can't use more than 3 monitors unless you use the [Vivado AR_72614 patch](https://support.xilinx.com/s/article/72614?language=en_US). 
 
@@ -28,7 +28,7 @@ If you're on Linux, you can't use more than 3 monitors unless you use the [Vivad
 
 For the build environments, Ettus provides both a [UHD-from-source Guide](https://files.ettus.com/manual/page_build_guide.html) and an [FGPA Guide](https://files.ettus.com/manual/md_usrp3_build_instructions.html).
 
-*If using the development repository of UHD, make sure to use that repository when building from source!*
+Check out the UHD release tag matching the UHD version on your hosts (e.g. `git checkout v4.8.0.0`) and use that same tree for the host build, `rfnoc_image_builder`, and the FPGA build, so the FPGA image's compat version matches your UHD driver.
 
 ### x410 Setup
 
@@ -45,7 +45,7 @@ Before continuing, make sure you have (in order):
 
 All instructions above should be located within the User Manual.
 
-**If you are running on a development branch**: You need to install that development version of MPM onto the x410 from that branch. Here are the steps to do so:
+**If your x410's embedded UHD/MPM version does not match your host UHD version** (normally you should just update the x410 filesystem with `uhd_usrp_update_fs`): you can install a matching MPM onto the x410 from source. Here are the steps to do so:
 
 - (If you have internet connection on the x410) Clone the git repository onto the x410
   - `ssh root@[x410_address]`
@@ -67,7 +67,32 @@ If you want to go the route of cross-compiling, you can attempt to adapt [the st
 
 ### Post-setup
 
-After doing this, if you want to build the dev branch FPGA image, might as well start it now since it will take a long while. View the [FGPA Guide](https://files.ettus.com/manual/md_usrp3_build_instructions.html) for instructions.
+After doing this, if you want to build the FPGA image, might as well start it now since it will take a long while. View the [FGPA Guide](https://files.ettus.com/manual/md_usrp3_build_instructions.html) for instructions.
+
+### Building the FPGA image
+
+From `oot_rfnoc_difi/`, with a UHD 4.8 host install (for `rfnoc_image_builder`) and the UHD 4.8 FPGA source tree:
+
+``` bash
+rfnoc_image_builder -y icores/x410_100_rfnoc_difi_basic_image_core.yml \
+    -F /path/to/uhd/fpga -I . --vivado-path /tools/Xilinx/Vivado
+```
+
+For iterative development (e.g. changing only the DIFI block), enable Vivado's
+incremental implementation to reuse the previous run's placement/routing:
+
+``` bash
+INCR_BUILD=1 rfnoc_image_builder -y icores/x410_100_rfnoc_difi_basic_image_core.yml \
+    -F /path/to/uhd/fpga -I . --vivado-path /tools/Xilinx/Vivado
+```
+
+This uses the `post_route.dcp` checkpoint from the previous build of the same
+image core (kept in `build-<image_core_name>/`), so don't delete that directory
+between builds and don't pass `--clean-all`. Two caveats: (1) synthesis still
+runs from scratch — only place & route is incremental; (2) after large changes
+(new blocks in the image core, big RTL rewrites) or if the post-route timing
+report shows violations, delete `build-<image_core_name>/post_route.dcp` and do
+a clean build so the reference checkpoint doesn't drift.
 
 ## RFNoC Development
 

@@ -35,11 +35,13 @@ link_directories(
     ${Boost_LIBRARY_DIRS}
 )
 
+find_library(DIFIPACK_LIBRARY difipack REQUIRED)
+
 add_library(rfnoc-difi SHARED
     ${rfnoc_difi_sources}
 )
 target_link_libraries(rfnoc-difi
-    difipack
+    ${DIFIPACK_LIBRARY}
     ${UHD_LIBRARIES}
     ${Boost_LIBRARIES}
     ${GNURADIO_ALL_LIBRARIES}
