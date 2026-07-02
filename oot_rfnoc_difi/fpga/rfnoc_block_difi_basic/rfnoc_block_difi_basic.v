@@ -492,6 +492,21 @@ module rfnoc_block_difi_basic #(
         out_payload_tvalid <= m_in_payload_tvalid;
         in_payload_tready <= s_out_payload_tready;
       end
+      // Full default assignment so no latches are inferred for the
+      // unreachable state encodings (state is 4 bits, only 11 states used)
+      default : begin
+        out_context_tdata <= {CHDR_W{1'b0}};
+        out_context_tuser <= 4'b0;
+        out_context_tlast <= 1'b0;
+        out_context_tvalid <= 1'b0;
+        in_context_tready <= 1'b0;
+
+        out_payload_tdata <= 32'b0;
+        out_payload_tkeep <= 1'b0;
+        out_payload_tlast <= 1'b0;
+        out_payload_tvalid <= 1'b0;
+        in_payload_tready <= 1'b0;
+      end
     endcase
   end
 
