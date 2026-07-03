@@ -12,6 +12,7 @@ OOT_FPGA_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # itself will contain a Makefile.srcs
 include $(OOT_FPGA_DIR)/rfnoc_block_difi/Makefile.srcs
 include $(OOT_FPGA_DIR)/rfnoc_block_difi_basic/Makefile.srcs
+include $(OOT_FPGA_DIR)/rfnoc_block_difi_deframer/Makefile.srcs
 
 include $(OOT_FPGA_DIR)/ip/mult_64_1e12_5p_ce/Makefile.inc
 LIB_IP_XCI_SRCS += $(LIB_IP_MULT_64_1E12_5P_CE_SRCS)
