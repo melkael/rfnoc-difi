@@ -176,9 +176,14 @@ module rfnoc_block_difi_deframer_tb;
     int num_packets,
     int max_spp = SPP,
     int prob_in = STALL_PROB,
-    int prob_out = STALL_PROB
+    int prob_out = STALL_PROB,
+    bit force_odd = 1'b0
   );
     mailbox #(test_packet_t) packets_mb_in = new();
+    // Counting pattern continuing across packets: any cross-packet sample
+    // slip (e.g. odd-length repacking bugs) breaks the sequence and is
+    // caught, unlike with random data.
+    static int unsigned sample_counter = 32'h1000_0000;
 
     // Set the BFM TREADY behavior
     blk_ctrl.set_master_stall_prob(0, prob_in);
@@ -191,11 +196,15 @@ module rfnoc_block_difi_deframer_tb;
 
         // At least one sample after the DIFI header words
         num_samples = $urandom_range(1, max_spp);
+        if (force_odd) num_samples = (num_samples | 1);
 
-        // Payload = 7 random DIFI header words + random samples
+        // Payload = 7 random DIFI header words + counting-pattern samples
         packet_in.samples = {};
-        for (int i = 0; i < DIFI_HDR_WORDS + num_samples; i++) begin
+        for (int i = 0; i < DIFI_HDR_WORDS; i++) begin
           packet_in.samples.push_back($urandom());
+        end
+        for (int i = 0; i < num_samples; i++) begin
+          packet_in.samples.push_back(sample_counter++);
         end
 
         // Generate random metadata
@@ -305,6 +314,10 @@ module rfnoc_block_difi_deframer_tb;
 
       test.start_test("Test min packet size", 1ms);
       test_rand(10, 1);
+      test.end_test();
+
+      test.start_test("Test odd sample counts (cross-packet)", 1ms);
+      test_rand(NUM_PACKETS, SPP, STALL_PROB, STALL_PROB, 1'b1);
       test.end_test();
     end
 

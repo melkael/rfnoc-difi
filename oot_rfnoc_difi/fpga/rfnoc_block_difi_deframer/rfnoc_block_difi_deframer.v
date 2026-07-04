@@ -18,6 +18,15 @@
 //   timestamp) pass through unmodified. Packets must contain at least one
 //   sample after the DIFI header (i.e., payload of at least 8 words).
 //
+//   IMPORTANT - sample count alignment: the sample count per packet (after
+//   the DIFI header) must be a multiple of the NIPC of the downstream
+//   consumer (e.g., 2 for the X410 DUC at RF_BW=200). This block emits
+//   correct CHDR packets for any sample count (verified in simulation),
+//   but stock UHD DSP blocks such as the DUC ignore tkeep on their input
+//   (rfnoc_block_duc.v ties it off), so a packet ending in a partial
+//   CHDR word gets a phantom pad sample appended, causing a cumulative
+//   timing slip. Keep the post-strip sample count even.
+//
 // Parameters:
 //
 //   THIS_PORTID : Control crossbar port to which this block is connected

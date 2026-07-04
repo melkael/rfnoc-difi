@@ -94,6 +94,23 @@ runs from scratch — only place & route is incremental; (2) after large changes
 report shows violations, delete `build-<image_core_name>/post_route.dcp` and do
 a clean build so the reference checkpoint doesn't drift.
 
+## DIFI TX (deframer)
+
+`oot_rfnoc_difi/fpga/rfnoc_block_difi_deframer` implements the TX direction:
+the host sends UDP packets of `CHDR header (8B) + DIFI header (28B) + sc16
+samples` to a stream endpoint; the deframer strips the DIFI header and
+forwards plain CHDR sample packets into a DUC/radio chain (see the
+`x410_UC_200_stock64_difi_tx_image_core.yml` image core, which places it on
+the RF B:0 TX path).
+
+Two host-side requirements:
+
+- At least one sample per packet after the DIFI header.
+- The sample count per packet must be a multiple of the downstream NIPC
+  (2 on the X410 at RF_BW=200): stock UHD DSP blocks (e.g. the DUC) ignore
+  `tkeep` on their input, so packets ending in a partial CHDR word pick up a
+  phantom pad sample, causing a cumulative timing slip.
+
 ## RFNoC Development
 
 ### Introduction
