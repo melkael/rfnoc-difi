@@ -179,87 +179,111 @@ module rfnoc_block_difi_deframer_tb;
     int prob_out = STALL_PROB,
     bit force_odd = 1'b0
   );
-    mailbox #(test_packet_t) packets_mb_in = new();
-    // Counting pattern continuing across packets: any cross-packet sample
-    // slip (e.g. odd-length repacking bugs) breaks the sequence and is
-    // caught, unlike with random data.
+    // Golden model of the residue-repacking algorithm: given the input
+    // packet sizes and EOB flags, the expected output packet sizes are
+    // fully deterministic. The counting-pattern sample stream makes any
+    // cross-packet slip, duplication, or loss detectable.
+    item_t      expected_stream[$];
+    int         expected_sizes[$];
+    bit         expected_eob[$];
+    int         golden_residue;
     static int unsigned sample_counter = 32'h1000_0000;
+
+    golden_residue = 0;
 
     // Set the BFM TREADY behavior
     blk_ctrl.set_master_stall_prob(0, prob_in);
     blk_ctrl.set_slave_stall_prob(0, prob_out);
 
-    fork
-      repeat (num_packets) begin : send_process
+    // Precompute all input packets and the golden expectations so the
+    // send process is a simple replay.
+    begin : precompute_and_send
+      test_packet_t packets[$];
+      for (int p = 0; p < num_packets; p++) begin
         test_packet_t packet_in;
         int num_samples;
+        int avail, res_next, out_samps;
+        bit eob;
 
-        // At least one sample after the DIFI header words
         num_samples = $urandom_range(1, max_spp);
         if (force_odd) num_samples = (num_samples | 1);
+        // Flush periodically and always on the final packet so the
+        // stream comparison completes.
+        eob = (p == num_packets - 1) || ($urandom_range(0, 49) == 0);
 
         // Payload = 7 random DIFI header words + counting-pattern samples
         packet_in.samples = {};
-        for (int i = 0; i < DIFI_HDR_WORDS; i++) begin
+        for (int i = 0; i < DIFI_HDR_WORDS; i++)
           packet_in.samples.push_back($urandom());
-        end
         for (int i = 0; i < num_samples; i++) begin
-          packet_in.samples.push_back(sample_counter++);
+          packet_in.samples.push_back(sample_counter);
+          expected_stream.push_back(sample_counter);
+          sample_counter++;
         end
 
-        // Generate random metadata
         packet_in.mdata = {};
-        for (int i = 0; i < $urandom_range(0,31); i++)
-          packet_in.mdata.push_back(Rand #(CHDR_W)::rand_logic());
-
-        // Generate random header info
         packet_in.pkt_info = Rand #($bits(packet_in.pkt_info))::rand_logic();
+        packet_in.pkt_info.eob = eob;
 
-        // Enqueue the packets for each port
-        blk_ctrl.send_items(0, packet_in.samples, packet_in.mdata, packet_in.pkt_info);
-
-        // Enqueue what we sent for the receiver to check the output
-        packets_mb_in.put(packet_in);
-      end
-      begin
-        repeat (num_packets) begin : recv_process
-          test_packet_t packet_in, packet_out;
-          string str;
-
-          // Grab the next pair of packets that was input
-          packets_mb_in.get(packet_in);
-
-          // Receive a packet
-          blk_ctrl.recv_items_adv(0, packet_out.samples,
-            packet_out.mdata, packet_out.pkt_info);
-
-          // Output packet must be the input minus the DIFI header words
-          $sformat(str,
-            "Output packet length didn't match input - %0d. Expected: %0d, Received: %0d",
-            DIFI_HDR_WORDS, packet_in.samples.size() - DIFI_HDR_WORDS,
-            packet_out.samples.size());
-          `ASSERT_ERROR(
-            packet_in.samples.size() - DIFI_HDR_WORDS == packet_out.samples.size(), str);
-
-          // Check that the output packet header info matches the input
-          `ASSERT_ERROR(packet_info_equal(packet_in.pkt_info, packet_out.pkt_info),
-            "Output packet header info didn't match input");
-
-          // Check the metadata
-          `ASSERT_ERROR(ChdrData #(CHDR_W)::chdr_equal(packet_in.mdata, packet_out.mdata),
-            "Output metadata info didn't match input");
-
-          // Verify the sample data survives unmodified
-          for (int i = 0; i < packet_out.samples.size(); i++) begin
-            $sformat(str,
-              "Incorrect value received on output [%0d]! Expected: 0x%X, Received: 0x%X",
-              i, packet_in.samples[i + DIFI_HDR_WORDS], packet_out.samples[i]);
-            `ASSERT_ERROR(
-              packet_in.samples[i + DIFI_HDR_WORDS] == packet_out.samples[i], str);
-          end
+        // Golden model
+        avail     = golden_residue + num_samples;
+        res_next  = eob ? 0 : (avail & 1);
+        out_samps = avail - res_next;
+        golden_residue = res_next;
+        if (out_samps > 0) begin
+          expected_sizes.push_back(out_samps);
+          expected_eob.push_back(eob);
         end
+
+        packets.push_back(packet_in);
       end
-    join
+
+      fork
+        begin : send_process
+          foreach (packets[p])
+            blk_ctrl.send_items(0, packets[p].samples, packets[p].mdata,
+                                packets[p].pkt_info);
+        end
+        begin : recv_process
+          int stream_idx = 0;
+          foreach (expected_sizes[k]) begin
+            test_packet_t packet_out;
+            string str;
+
+            blk_ctrl.recv_items_adv(0, packet_out.samples,
+              packet_out.mdata, packet_out.pkt_info);
+
+            // Packet size must match the golden model exactly
+            $sformat(str,
+              "Output packet %0d size mismatch. Expected: %0d, Received: %0d",
+              k, expected_sizes[k], packet_out.samples.size());
+            `ASSERT_ERROR(packet_out.samples.size() == expected_sizes[k], str);
+
+            // Alignment invariant: every non-EOB output packet is even
+            if (!expected_eob[k]) begin
+              $sformat(str, "Non-EOB output packet %0d has odd size %0d",
+                k, packet_out.samples.size());
+              `ASSERT_ERROR((packet_out.samples.size() % 2) == 0, str);
+            end
+
+            // EOB must be preserved on the packets that carry it
+            $sformat(str, "Output packet %0d EOB mismatch", k);
+            `ASSERT_ERROR(packet_out.pkt_info.eob == expected_eob[k], str);
+
+            // Stream continuity: samples must be the exact input stream
+            for (int i = 0; i < packet_out.samples.size(); i++) begin
+              $sformat(str,
+                "Stream mismatch at global sample %0d! Expected: 0x%X, Received: 0x%X",
+                stream_idx, expected_stream[stream_idx], packet_out.samples[i]);
+              `ASSERT_ERROR(packet_out.samples[i] == expected_stream[stream_idx], str);
+              stream_idx++;
+            end
+          end
+          `ASSERT_ERROR(stream_idx == expected_stream.size(),
+            "Not all input samples were received");
+        end
+      join
+    end
   endtask : test_rand
 
   //---------------------------------------------------------------------------

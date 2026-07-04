@@ -103,13 +103,14 @@ forwards plain CHDR sample packets into a DUC/radio chain (see the
 `x410_UC_200_stock64_difi_tx_image_core.yml` image core, which places it on
 the RF B:0 TX path).
 
-Two host-side requirements:
-
-- At least one sample per packet after the DIFI header.
-- The sample count per packet must be a multiple of the downstream NIPC
-  (2 on the X410 at RF_BW=200): stock UHD DSP blocks (e.g. the DUC) ignore
-  `tkeep` on their input, so packets ending in a partial CHDR word pick up a
-  phantom pad sample, causing a cumulative timing slip.
+Any DIFI-legal sample count (>= 1 per packet) is accepted: the deframer
+re-packs samples across packet boundaries so that only NIPC-aligned packets
+reach the stock DUC (which ignores `tkeep` on its input and would otherwise
+append a phantom pad sample on odd packets). A packet with EOB set flushes
+the carried residue. Two caveats: packets deliver at least one sample after
+the DIFI header, and CHDR timestamps pass through unmodified, so timed
+streams are only sample-accurate when packets are already aligned (untimed
+streaming recommended for odd counts).
 
 ## RFNoC Development
 

@@ -18,14 +18,25 @@
 //   timestamp) pass through unmodified. Packets must contain at least one
 //   sample after the DIFI header (i.e., payload of at least 8 words).
 //
-//   IMPORTANT - sample count alignment: the sample count per packet (after
-//   the DIFI header) must be a multiple of the NIPC of the downstream
-//   consumer (e.g., 2 for the X410 DUC at RF_BW=200). This block emits
-//   correct CHDR packets for any sample count (verified in simulation),
-//   but stock UHD DSP blocks such as the DUC ignore tkeep on their input
-//   (rfnoc_block_duc.v ties it off), so a packet ending in a partial
-//   CHDR word gets a phantom pad sample appended, causing a cumulative
-//   timing slip. Keep the post-strip sample count even.
+//   Sample count alignment (DIFI compliance): DIFI permits any sample
+//   count per packet, but stock UHD DSP blocks such as the DUC ignore
+//   tkeep on their input (rfnoc_block_duc.v ties it off), so packets
+//   ending in a partial CHDR word would pick up a phantom pad sample.
+//   To accept arbitrary DIFI packets while emitting only aligned ones,
+//   this block re-packs across packet boundaries: when a packet's
+//   available sample count (carried residue + new samples) is odd, the
+//   final sample is retained and prepended to the next packet. A packet
+//   whose CHDR header has EOB set flushes the residue (its output packet
+//   may then be odd; it is the last of the burst, so the pad sample the
+//   DUC appends is inconsequential). Packets that would emit zero
+//   samples (single sample, no residue, no EOB) are dropped whole and
+//   their sample carried forward. The sample *stream* is preserved
+//   bit-exactly; only packet boundaries move.
+//
+//   Limitations: CHDR timestamps pass through unmodified, so timed
+//   streams are only sample-accurate when every packet is already
+//   aligned (untimed streaming recommended for odd counts). Each packet
+//   must contain at least one sample after the DIFI header.
 //
 // Parameters:
 //
@@ -213,56 +224,207 @@ module rfnoc_block_difi_deframer #(
   localparam DIFI_HEADER_BYTES = 16'd28;
 
   //---------------------------------------------------------------------------
-  // Context path: pass through, shortening the CHDR header's length field
-  // by the DIFI header size. The first context word of every packet is the
-  // CHDR header; all further context words (timestamp, metadata) pass
-  // unmodified.
+  // Per-packet EOB flag queue (context -> payload)
+  //
+  // The context path learns EOB from the CHDR header as soon as it arrives;
+  // the payload path needs it at the *end* of the corresponding payload to
+  // decide whether to flush or retain the residue. A small ring buffer
+  // carries one flag per packet. The CHDR builder downstream consumes the
+  // context header of packet k before packet k's payload completes, so the
+  // flag is always written before the payload path blocks on it.
   //---------------------------------------------------------------------------
 
-  reg ctxt_first_word = 1'b1;
+  reg  [63:0] eob_queue;
+  reg  [5:0]  eobq_wr = 6'd0;
+  reg  [5:0]  eobq_rd = 6'd0;
+  wire        eobq_empty = (eobq_wr == eobq_rd);
+  wire        eobq_full  = (eobq_wr + 6'd1 == eobq_rd);
+  wire        eob_cur    = eob_queue[eobq_rd];
+
+  //---------------------------------------------------------------------------
+  // Context path
+  //
+  // On each packet's CHDR header word: compute the incoming sample count N
+  // from the length field, combine with the carried residue, and emit a
+  // header whose length reflects the aligned output sample count. Packets
+  // that would emit zero samples are dropped whole (all context words
+  // swallowed). Non-header context words pass through unmodified.
+  //---------------------------------------------------------------------------
+
+  reg        ctxt_first_word = 1'b1;
+  reg        ctxt_drop       = 1'b0;
+  reg        ctxt_residue    = 1'b0;
+
+  // Header field extraction (combinational, valid when ctxt_first_word)
+  wire [15:0] hdr_len_in    = chdr_get_length(m_in_context_tdata);
+  wire        hdr_eob       = chdr_get_eob(m_in_context_tdata);
+  wire [15:0] hdr_overhead  = 16'd8 + (chdr_get_has_time(m_in_context_tdata) ? 16'd8 : 16'd0)
+                              + ({11'd0, chdr_get_num_mdata(m_in_context_tdata)} << 3);
+  // Incoming sample count N (32-bit words after the DIFI header)
+  wire [15:0] hdr_n_samps   = (hdr_len_in - hdr_overhead - DIFI_HEADER_BYTES) >> 2;
+  wire [16:0] hdr_avail     = {1'b0, hdr_n_samps} + {16'd0, ctxt_residue};
+  // Guard N == 0 (host contract violation): drop, keep residue
+  wire        hdr_res_next  = (hdr_n_samps == 16'd0) ? ctxt_residue :
+                              (hdr_eob ? 1'b0 : hdr_avail[0]);
+  wire [16:0] hdr_out_samps = hdr_avail - {16'd0, hdr_res_next};
+  wire        hdr_drop      = (hdr_out_samps == 17'd0);
+  wire [15:0] hdr_len_out   = hdr_overhead + (hdr_out_samps[15:0] << 2);
+
+  // Header beats also require space in the EOB queue
+  wire ctxt_hdr_stall = ctxt_first_word && eobq_full;
+
+  wire ctxt_in_beat = m_in_context_tvalid && m_in_context_tready;
 
   always @(posedge axis_data_clk) begin
     if (axis_data_rst) begin
       ctxt_first_word <= 1'b1;
-    end else if (m_in_context_tvalid && m_in_context_tready) begin
-      ctxt_first_word <= m_in_context_tlast;
+      ctxt_drop       <= 1'b0;
+      ctxt_residue    <= 1'b0;
+      eobq_wr         <= 6'd0;
+    end else if (ctxt_in_beat) begin
+      if (ctxt_first_word) begin
+        ctxt_drop            <= hdr_drop && !m_in_context_tlast ? 1'b1 : 1'b0;
+        ctxt_residue         <= hdr_res_next;
+        eob_queue[eobq_wr]   <= hdr_eob;
+        eobq_wr              <= eobq_wr + 6'd1;
+      end
+      if (m_in_context_tlast) begin
+        ctxt_first_word <= 1'b1;
+        ctxt_drop       <= 1'b0;
+      end else begin
+        ctxt_first_word <= 1'b0;
+      end
     end
   end
 
+  wire ctxt_emitting = ctxt_first_word ? !hdr_drop : !ctxt_drop;
+
   assign s_out_context_tdata  = ctxt_first_word ?
-    chdr_set_length(m_in_context_tdata,
-                    chdr_get_length(m_in_context_tdata) - DIFI_HEADER_BYTES) :
-    m_in_context_tdata;
+    chdr_set_length(m_in_context_tdata, hdr_len_out) : m_in_context_tdata;
   assign s_out_context_tuser  = m_in_context_tuser;
   assign s_out_context_tlast  = m_in_context_tlast;
-  assign s_out_context_tvalid = m_in_context_tvalid;
-  assign m_in_context_tready  = s_out_context_tready;
+  assign s_out_context_tvalid = m_in_context_tvalid && ctxt_emitting && !ctxt_hdr_stall;
+  assign m_in_context_tready  = !ctxt_hdr_stall &&
+                                (ctxt_emitting ? s_out_context_tready : 1'b1);
 
   //---------------------------------------------------------------------------
-  // Payload path: swallow the first DIFI_HEADER_WORDS words of each packet,
-  // pass the remaining sample words through unmodified.
+  // Payload path
+  //
+  // Per packet: skip the 7 DIFI header words, then stream samples through a
+  // one-deep skid buffer so that tlast placement (and residue retention)
+  // can be decided when the final input sample arrives. The residue sample
+  // from an odd packet is prepended to the next packet's samples.
   //---------------------------------------------------------------------------
 
-  reg [2:0] pyld_word_count = 3'd0;
+  localparam PS_SKIP   = 2'd0;
+  localparam PS_STREAM = 2'd1;
+  localparam PS_FLUSH  = 2'd2;
 
-  wire in_difi_header = (pyld_word_count != DIFI_HEADER_WORDS);
+  reg [1:0]  pyld_state = PS_SKIP;
+  reg [2:0]  skip_count = 3'd0;
+  reg [31:0] skid_data;
+  reg        skid_valid = 1'b0;
+  reg [31:0] residue_data;
+  reg        residue_valid = 1'b0;
+  reg        avail_parity  = 1'b0;  // parity of residue + samples received
+
+  // At the final input sample: parity including this sample
+  wire pyld_par_after = avail_parity ^ 1'b1;
+  // Retain the final sample as residue? (needs EOB flag; see stall below)
+  wire pyld_retain    = pyld_par_after && !eob_cur;
+  // Final-beat decisions require the EOB flag for this packet
+  wire pyld_last_stall = m_in_payload_tlast && eobq_empty;
+
+  wire pyld_in_beat  = m_in_payload_tvalid && m_in_payload_tready;
+  wire pyld_out_beat = s_out_payload_tvalid && s_out_payload_tready;
 
   always @(posedge axis_data_clk) begin
     if (axis_data_rst) begin
-      pyld_word_count <= 3'd0;
-    end else if (m_in_payload_tvalid && m_in_payload_tready) begin
-      if (m_in_payload_tlast)
-        pyld_word_count <= 3'd0;
-      else if (in_difi_header)
-        pyld_word_count <= pyld_word_count + 3'd1;
+      pyld_state    <= PS_SKIP;
+      skip_count    <= 3'd0;
+      skid_valid    <= 1'b0;
+      residue_valid <= 1'b0;
+      avail_parity  <= 1'b0;
+      eobq_rd       <= 6'd0;
+    end else begin
+      case (pyld_state)
+        PS_SKIP: begin
+          if (pyld_in_beat) begin
+            if (m_in_payload_tlast) begin
+              // Packet ended inside the DIFI header (N == 0 contract
+              // violation): discard, keep residue, consume the EOB flag.
+              skip_count <= 3'd0;
+              eobq_rd    <= eobq_rd + 6'd1;
+            end else if (skip_count == DIFI_HEADER_WORDS - 3'd1) begin
+              // Last DIFI header word: enter streaming, preload residue
+              skip_count   <= 3'd0;
+              pyld_state   <= PS_STREAM;
+              skid_data    <= residue_data;
+              skid_valid   <= residue_valid;
+              avail_parity <= residue_valid;
+              residue_valid <= 1'b0;
+            end else begin
+              skip_count <= skip_count + 3'd1;
+            end
+          end
+        end
+
+        PS_STREAM: begin
+          if (pyld_in_beat) begin
+            avail_parity <= avail_parity ^ 1'b1;
+            if (m_in_payload_tlast) begin
+              eobq_rd <= eobq_rd + 6'd1;
+              if (pyld_retain) begin
+                // Final sample becomes the residue; packet output (if any)
+                // ended with the skid emitted this beat.
+                residue_data  <= m_in_payload_tdata;
+                residue_valid <= 1'b1;
+                skid_valid    <= 1'b0;
+                pyld_state    <= PS_SKIP;
+              end else begin
+                // Final sample must be emitted with tlast: park it in the
+                // skid and flush next.
+                skid_data  <= m_in_payload_tdata;
+                skid_valid <= 1'b1;
+                pyld_state <= PS_FLUSH;
+              end
+            end else begin
+              skid_data  <= m_in_payload_tdata;
+              skid_valid <= 1'b1;
+            end
+          end
+        end
+
+        PS_FLUSH: begin
+          if (pyld_out_beat) begin
+            skid_valid <= 1'b0;
+            pyld_state <= PS_SKIP;
+          end
+        end
+
+        default: pyld_state <= PS_SKIP;
+      endcase
     end
   end
 
-  assign s_out_payload_tdata  = m_in_payload_tdata;
-  assign s_out_payload_tkeep  = m_in_payload_tkeep;
-  assign s_out_payload_tlast  = m_in_payload_tlast;
-  assign s_out_payload_tvalid = m_in_payload_tvalid && !in_difi_header;
-  assign m_in_payload_tready  = in_difi_header ? 1'b1 : s_out_payload_tready;
+  // Output/input handshake wiring
+  //  - PS_SKIP:   consume freely, emit nothing
+  //  - PS_STREAM: emitting the skid requires an input beat displacing it;
+  //               the retained-final-sample case emits the skid with tlast
+  //  - PS_FLUSH:  emit the parked final sample with tlast
+  assign s_out_payload_tdata  = (pyld_state == PS_FLUSH) ? skid_data :
+                                skid_valid ? skid_data : 32'b0;
+  assign s_out_payload_tkeep  = 1'b1;
+  assign s_out_payload_tlast  = (pyld_state == PS_FLUSH) ? 1'b1 :
+                                (m_in_payload_tlast && pyld_retain);
+  assign s_out_payload_tvalid =
+    (pyld_state == PS_FLUSH)  ? 1'b1 :
+    (pyld_state == PS_STREAM) ? (skid_valid && m_in_payload_tvalid && !pyld_last_stall) :
+    1'b0;
+  assign m_in_payload_tready  =
+    (pyld_state == PS_SKIP)   ? 1'b1 :
+    (pyld_state == PS_STREAM) ? (!pyld_last_stall && (skid_valid ? s_out_payload_tready : 1'b1)) :
+    1'b0; // PS_FLUSH: hold input until the flush completes
 
   // Fixed-function block: no user registers
   assign m_ctrlport_resp_ack  = 1'b0;
