@@ -242,6 +242,26 @@ module rfnoc_block_difi_deframer #(
   wire        eob_cur    = eob_queue[eobq_rd];
 
   //---------------------------------------------------------------------------
+  // Per-packet DIFI type flag queue (payload -> context)
+  //
+  // The DIFI packet type lives in the first payload word, but the context
+  // path must drop the CHDR header of non-data DIFI packets (e.g., the
+  // standard flow signal context packets that compliant DIFI senders emit
+  // periodically). The payload path classifies each packet at its first
+  // word and queues the verdict; the context path stalls at each CHDR
+  // header until the verdict for that packet is available. The input-side
+  // FIFOs in the NoC shell guarantee the first payload word is obtainable
+  // while the context header waits, so this cannot deadlock.
+  //---------------------------------------------------------------------------
+
+  reg  [63:0] type_ok_queue;
+  reg  [5:0]  typeq_wr = 6'd0;
+  reg  [5:0]  typeq_rd = 6'd0;
+  wire        typeq_empty = (typeq_wr == typeq_rd);
+  wire        typeq_full  = (typeq_wr + 6'd1 == typeq_rd);
+  wire        type_ok_cur = type_ok_queue[typeq_rd];
+
+  //---------------------------------------------------------------------------
   // Context path
   //
   // On each packet's CHDR header word: compute the incoming sample count N
@@ -267,11 +287,14 @@ module rfnoc_block_difi_deframer #(
   wire        hdr_res_next  = (hdr_n_samps == 16'd0) ? ctxt_residue :
                               (hdr_eob ? 1'b0 : hdr_avail[0]);
   wire [16:0] hdr_out_samps = hdr_avail - {16'd0, hdr_res_next};
-  wire        hdr_drop      = (hdr_out_samps == 17'd0);
+  wire        hdr_zero_drop = (hdr_out_samps == 17'd0);
+  // Non-data DIFI packet (verdict from the payload path's type queue)
+  wire        hdr_type_drop = !type_ok_cur;
+  wire        hdr_any_drop  = hdr_zero_drop || hdr_type_drop;
   wire [15:0] hdr_len_out   = hdr_overhead + (hdr_out_samps[15:0] << 2);
 
-  // Header beats also require space in the EOB queue
-  wire ctxt_hdr_stall = ctxt_first_word && eobq_full;
+  // Header beats require space in the EOB queue and a type verdict
+  wire ctxt_hdr_stall = ctxt_first_word && (eobq_full || typeq_empty);
 
   wire ctxt_in_beat = m_in_context_tvalid && m_in_context_tready;
 
@@ -281,12 +304,16 @@ module rfnoc_block_difi_deframer #(
       ctxt_drop       <= 1'b0;
       ctxt_residue    <= 1'b0;
       eobq_wr         <= 6'd0;
+      typeq_rd        <= 6'd0;
     end else if (ctxt_in_beat) begin
       if (ctxt_first_word) begin
-        ctxt_drop            <= hdr_drop && !m_in_context_tlast ? 1'b1 : 1'b0;
-        ctxt_residue         <= hdr_res_next;
+        ctxt_drop            <= hdr_any_drop && !m_in_context_tlast ? 1'b1 : 1'b0;
+        // Residue is frozen across dropped non-data packets
+        if (!hdr_type_drop)
+          ctxt_residue       <= hdr_res_next;
         eob_queue[eobq_wr]   <= hdr_eob;
         eobq_wr              <= eobq_wr + 6'd1;
+        typeq_rd             <= typeq_rd + 6'd1;
       end
       if (m_in_context_tlast) begin
         ctxt_first_word <= 1'b1;
@@ -297,7 +324,7 @@ module rfnoc_block_difi_deframer #(
     end
   end
 
-  wire ctxt_emitting = ctxt_first_word ? !hdr_drop : !ctxt_drop;
+  wire ctxt_emitting = ctxt_first_word ? !hdr_any_drop : !ctxt_drop;
 
   assign s_out_context_tdata  = ctxt_first_word ?
     chdr_set_length(m_in_context_tdata, hdr_len_out) : m_in_context_tdata;
@@ -316,17 +343,27 @@ module rfnoc_block_difi_deframer #(
   // from an odd packet is prepended to the next packet's samples.
   //---------------------------------------------------------------------------
 
-  localparam PS_SKIP   = 2'd0;
-  localparam PS_STREAM = 2'd1;
-  localparam PS_FLUSH  = 2'd2;
+  localparam PS_SKIP   = 3'd0;
+  localparam PS_STREAM = 3'd1;
+  localparam PS_FLUSH  = 3'd2;
+  localparam PS_DROP   = 3'd3;  // consuming a non-data DIFI packet
+  localparam PS_DRAIN  = 3'd4;  // packet ended early: pop the EOB flag
 
-  reg [1:0]  pyld_state = PS_SKIP;
+  reg [2:0]  pyld_state = PS_SKIP;
   reg [2:0]  skip_count = 3'd0;
   reg [31:0] skid_data;
   reg        skid_valid = 1'b0;
   reg [31:0] residue_data;
   reg        residue_valid = 1'b0;
   reg        avail_parity  = 1'b0;  // parity of residue + samples received
+
+  // DIFI packet type check on the first payload word. The DIFI framer's
+  // byte packing places the VITA packet-type nibble at bits [23:20] of the
+  // word as seen on this bus. Only signal data packets (type 0x1) carry
+  // samples; anything else (standard/version context packets, types
+  // 0x4/0x5) is dropped whole.
+  wire pyld_word0     = (pyld_state == PS_SKIP) && (skip_count == 3'd0);
+  wire difi_type_ok   = (m_in_payload_tdata[23:20] == 4'h1);
 
   // At the final input sample: parity including this sample
   wire pyld_par_after = avail_parity ^ 1'b1;
@@ -346,15 +383,26 @@ module rfnoc_block_difi_deframer #(
       residue_valid <= 1'b0;
       avail_parity  <= 1'b0;
       eobq_rd       <= 6'd0;
+      typeq_wr      <= 6'd0;
     end else begin
       case (pyld_state)
         PS_SKIP: begin
           if (pyld_in_beat) begin
-            if (m_in_payload_tlast) begin
-              // Packet ended inside the DIFI header (N == 0 contract
-              // violation): discard, keep residue, consume the EOB flag.
+            if (pyld_word0) begin
+              // Classify the packet and queue the verdict for the context
+              // path (which stalls on it before emitting the CHDR header).
+              type_ok_queue[typeq_wr] <= difi_type_ok;
+              typeq_wr                <= typeq_wr + 6'd1;
+            end
+            if (pyld_word0 && !difi_type_ok) begin
+              // Non-data DIFI packet: consume it whole, emit nothing
               skip_count <= 3'd0;
-              eobq_rd    <= eobq_rd + 6'd1;
+              pyld_state <= m_in_payload_tlast ? PS_DRAIN : PS_DROP;
+            end else if (m_in_payload_tlast) begin
+              // Packet ended inside the DIFI header (N == 0 contract
+              // violation): discard, keep residue.
+              skip_count <= 3'd0;
+              pyld_state <= PS_DRAIN;
             end else if (skip_count == DIFI_HEADER_WORDS - 3'd1) begin
               // Last DIFI header word: enter streaming, preload residue
               skip_count   <= 3'd0;
@@ -402,16 +450,32 @@ module rfnoc_block_difi_deframer #(
           end
         end
 
+        PS_DROP: begin
+          if (pyld_in_beat && m_in_payload_tlast)
+            pyld_state <= PS_DRAIN;
+        end
+
+        PS_DRAIN: begin
+          // The context path may not have written this packet's EOB flag
+          // yet (it waits on our type verdict); pop it as soon as it lands.
+          if (!eobq_empty) begin
+            eobq_rd    <= eobq_rd + 6'd1;
+            pyld_state <= PS_SKIP;
+          end
+        end
+
         default: pyld_state <= PS_SKIP;
       endcase
     end
   end
 
   // Output/input handshake wiring
-  //  - PS_SKIP:   consume freely, emit nothing
+  //  - PS_SKIP:   consume freely (word 0 needs type-queue space), emit nothing
   //  - PS_STREAM: emitting the skid requires an input beat displacing it;
   //               the retained-final-sample case emits the skid with tlast
   //  - PS_FLUSH:  emit the parked final sample with tlast
+  //  - PS_DROP:   consume freely, emit nothing
+  //  - PS_DRAIN:  no input, no output; waiting to pop the EOB flag
   assign s_out_payload_tdata  = (pyld_state == PS_FLUSH) ? skid_data :
                                 skid_valid ? skid_data : 32'b0;
   assign s_out_payload_tkeep  = 1'b1;
@@ -422,9 +486,10 @@ module rfnoc_block_difi_deframer #(
     (pyld_state == PS_STREAM) ? (skid_valid && m_in_payload_tvalid && !pyld_last_stall) :
     1'b0;
   assign m_in_payload_tready  =
-    (pyld_state == PS_SKIP)   ? 1'b1 :
+    (pyld_state == PS_SKIP)   ? (pyld_word0 ? !typeq_full : 1'b1) :
     (pyld_state == PS_STREAM) ? (!pyld_last_stall && (skid_valid ? s_out_payload_tready : 1'b1)) :
-    1'b0; // PS_FLUSH: hold input until the flush completes
+    (pyld_state == PS_DROP)   ? 1'b1 :
+    1'b0; // PS_FLUSH / PS_DRAIN: hold input
 
   // Fixed-function block: no user registers
   assign m_ctrlport_resp_ack  = 1'b0;

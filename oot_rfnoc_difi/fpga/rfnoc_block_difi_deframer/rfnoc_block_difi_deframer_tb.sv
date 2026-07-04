@@ -204,6 +204,31 @@ module rfnoc_block_difi_deframer_tb;
         int num_samples;
         int avail, res_next, out_samps;
         bit eob;
+        bit is_context;
+        item_t word0;
+
+        // Periodically interleave a DIFI context packet (type 0x4/0x5),
+        // as a compliant third-party DIFI sender would; the deframer must
+        // drop it whole with no effect on the sample stream. Never on the
+        // final packet (that one must flush the residue).
+        is_context = (p != num_packets - 1) && ($urandom_range(0, 5) == 0);
+
+        if (is_context) begin
+          int ctxt_words = $urandom_range(8, 30);
+          packet_in.samples = {};
+          for (int i = 0; i < ctxt_words; i++) begin
+            word0 = $urandom();
+            if (i == 0) begin
+              word0[23:20] = ($urandom_range(0, 1) == 0) ? 4'h4 : 4'h5;
+            end
+            packet_in.samples.push_back(word0);
+          end
+          packet_in.mdata = {};
+          packet_in.pkt_info = Rand #($bits(packet_in.pkt_info))::rand_logic();
+          packet_in.pkt_info.eob = 1'b0;
+          packets.push_back(packet_in);
+          continue;
+        end
 
         num_samples = $urandom_range(1, max_spp);
         if (force_odd) num_samples = (num_samples | 1);
@@ -211,10 +236,14 @@ module rfnoc_block_difi_deframer_tb;
         // stream comparison completes.
         eob = (p == num_packets - 1) || ($urandom_range(0, 49) == 0);
 
-        // Payload = 7 random DIFI header words + counting-pattern samples
+        // Payload = 7 DIFI header words (word 0 carrying the data packet
+        // type nibble) + counting-pattern samples
         packet_in.samples = {};
-        for (int i = 0; i < DIFI_HDR_WORDS; i++)
-          packet_in.samples.push_back($urandom());
+        for (int i = 0; i < DIFI_HDR_WORDS; i++) begin
+          word0 = $urandom();
+          if (i == 0) word0[23:20] = 4'h1;
+          packet_in.samples.push_back(word0);
+        end
         for (int i = 0; i < num_samples; i++) begin
           packet_in.samples.push_back(sample_counter);
           expected_stream.push_back(sample_counter);
