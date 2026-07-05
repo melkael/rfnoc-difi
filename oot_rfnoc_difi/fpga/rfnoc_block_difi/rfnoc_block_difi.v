@@ -23,7 +23,10 @@
 module rfnoc_block_difi #(
   parameter [9:0] THIS_PORTID     = 10'd0,
   parameter       CHDR_W          = 64,
-  parameter [5:0] MTU             = 10
+  parameter [5:0] MTU             = 10,
+  // Context packet resend interval in rfnoc_chdr clock cycles;
+  // 0 selects the default (~1 s at 200 MHz). Overridable for simulation.
+  parameter [27:0] CTX_RESEND_CYCLES = 28'd0
 )(
   // RFNoC Framework Clocks and Resets
   input  wire                   rfnoc_chdr_clk,
@@ -199,6 +202,7 @@ module rfnoc_block_difi #(
   reg [15:0] difi_icc = REG_DIFI_ICC_DEFAULT;
   reg [15:0] difi_pcc = REG_DIFI_PCC_DEFAULT;
   reg [63:0] tick_period = REG_DIFI_TICK_PERIOD_DEFAULT;
+  reg ctx_wr_toggle = 1'b0;  // toggled on context payload register writes
   reg [31:0] standard_context_packet_payload [26:0];
   integer i;
 
@@ -253,7 +257,7 @@ module rfnoc_block_difi #(
           endcase
         end else begin
           m_ctrlport_resp_ack <= 1;
-          m_ctrlport_resp_data <= { standard_context_packet_payload[m_ctrlport_req_addr] };
+          m_ctrlport_resp_data <= { standard_context_packet_payload[m_ctrlport_req_addr - REG_DIFI_STANDARD_CONTEXT_ADDR] };
         end
       end
 
@@ -292,7 +296,9 @@ module rfnoc_block_difi #(
           endcase
         end else begin
           m_ctrlport_resp_ack <= 1;
-          standard_context_packet_payload[m_ctrlport_req_addr] <= m_ctrlport_resp_data;
+          standard_context_packet_payload[m_ctrlport_req_addr - REG_DIFI_STANDARD_CONTEXT_ADDR] <= m_ctrlport_req_data;
+          // Re-emit the context packet after the host updates its contents
+          ctx_wr_toggle <= ~ctx_wr_toggle;
         end
       end
     end
@@ -351,6 +357,12 @@ module rfnoc_block_difi #(
     .frac_timestamp_tready(cdtc_frac_timestamp_tready)
   );
 
+  function [31:0] pack_word(input [31:0] word);
+    begin
+      pack_word = { word[23:16], word[31:24], word[7:0], word[15:8] };
+    end
+  endfunction
+
   // State Machine ------------------------------------------------------------
 
   reg sent_context_packet = 1;
@@ -373,13 +385,33 @@ module rfnoc_block_difi #(
 
   reg [3:0] state = DIFI_MODIFY_CHDR_ST;
 
+  // DIFI v1.1 requires sources to emit the Standard Flow Signal Context
+  // packet periodically, and it should also be re-emitted whenever the host
+  // rewrites its contents. ~1 second at the 200 MHz rfnoc_chdr clock.
+  localparam CONTEXT_RESEND_CYCLES = (CTX_RESEND_CYCLES != 0) ? CTX_RESEND_CYCLES : 28'd200_000_000;
+  reg [27:0] ctx_resend_counter = 28'd0;
+  reg        ctx_wr_seen = 1'b0;
+
   // Transitions
   always @(posedge axis_data_clk) begin
     if (axis_data_rst) begin
       state <= DIFI_MODIFY_CHDR_ST;
       sent_context_packet <= 0;
       context_packet_counter <= 0;
+      ctx_resend_counter <= 28'd0;
+      ctx_wr_seen <= 1'b0;
     end else begin
+      // Periodic + host-triggered context packet re-emission
+      if (ctx_resend_counter == CONTEXT_RESEND_CYCLES - 28'd1) begin
+        ctx_resend_counter  <= 28'd0;
+        sent_context_packet <= 0;
+      end else begin
+        ctx_resend_counter <= ctx_resend_counter + 28'd1;
+      end
+      if (ctx_wr_seen != ctx_wr_toggle) begin
+        ctx_wr_seen         <= ctx_wr_toggle;
+        sent_context_packet <= 0;
+      end
       case(state)
         DIFI_MODIFY_CHDR_ST : begin
           if (m_in_context_tvalid && s_out_context_tready) begin
@@ -575,7 +607,7 @@ module rfnoc_block_difi #(
         out_context_tvalid <= 1'b0;
         in_context_tready <= 1'b0;
 
-        out_payload_tdata <= { 8'b00011000, difi_tsi, 2'b10, difi_seqnum, difi_packet_size };
+        out_payload_tdata <= pack_word({ 8'b00011000, difi_tsi, 2'b10, difi_seqnum, difi_packet_size });
         out_payload_tkeep <= 1'b1;
         out_payload_tlast <= 1'b0;
         out_payload_tvalid <= 1'b1;
@@ -593,7 +625,7 @@ module rfnoc_block_difi #(
         out_context_tvalid <= 1'b0;
         in_context_tready <= 1'b0;
 
-        out_payload_tdata <= { difi_streamid };
+        out_payload_tdata <= pack_word({ difi_streamid });
         out_payload_tkeep <= 1'b1;
         out_payload_tlast <= 1'b0;
         out_payload_tvalid <= 1'b1;
@@ -611,7 +643,7 @@ module rfnoc_block_difi #(
         out_context_tvalid <= 1'b0;
         in_context_tready <= 1'b0;
 
-        out_payload_tdata <= { 8'b00000000, difi_oui };
+        out_payload_tdata <= pack_word({ 8'b00000000, difi_oui });
         out_payload_tkeep <= 1'b1;
         out_payload_tlast <= 1'b0;
         out_payload_tvalid <= 1'b1;
@@ -629,7 +661,7 @@ module rfnoc_block_difi #(
         out_context_tvalid <= 1'b0;
         in_context_tready <= 1'b0;
 
-        out_payload_tdata <= { difi_icc, difi_pcc };
+        out_payload_tdata <= pack_word({ difi_icc, difi_pcc });
         out_payload_tkeep <= 1'b1;
         out_payload_tlast <= 1'b0;
         out_payload_tvalid <= 1'b1;
@@ -647,7 +679,7 @@ module rfnoc_block_difi #(
         out_context_tvalid <= 1'b0;
         in_context_tready <= 1'b0;
 
-        out_payload_tdata <= chdr_timestamp == 0 ? 0 : { difi_int_timestamp };
+        out_payload_tdata <= chdr_timestamp == 0 ? 0 : pack_word({ difi_int_timestamp });
         out_payload_tkeep <= 1'b1;
         out_payload_tlast <= 1'b0;
         out_payload_tvalid <= (cdtc_int_timestamp_tvalid || !chdr_timestamp);
@@ -665,7 +697,7 @@ module rfnoc_block_difi #(
         out_context_tvalid <= 1'b0;
         in_context_tready <= 1'b0;
 
-        out_payload_tdata <= chdr_timestamp == 0 ? 0 : { cdtc_frac_timestamp_tdata[63:32] };
+        out_payload_tdata <= chdr_timestamp == 0 ? 0 : pack_word({ cdtc_frac_timestamp_tdata[63:32] });
         out_payload_tkeep <= 1'b1;
         out_payload_tlast <= 1'b0;
         out_payload_tvalid <= (cdtc_frac_timestamp_tvalid || !chdr_timestamp);
@@ -685,7 +717,7 @@ module rfnoc_block_difi #(
         out_context_tvalid <= 1'b0;
         in_context_tready <= 1'b0;
 
-        out_payload_tdata <= { difi_frac_timestamp[31:0] };
+        out_payload_tdata <= pack_word({ difi_frac_timestamp[31:0] });
         out_payload_tkeep <= 1'b1;
         out_payload_tlast <= 1'b0;
         out_payload_tvalid <= 1'b1;
@@ -703,7 +735,9 @@ module rfnoc_block_difi #(
         out_context_tvalid <= 1'b0;
         in_context_tready <= 1'b0;
 
-        out_payload_tdata <= m_in_payload_tdata;
+        // DIFI/VITA 49 payload is big-endian: swap the bytes of each int16
+        // (pack_word swizzles bytes within each 16-bit half)
+        out_payload_tdata <= pack_word(m_in_payload_tdata);
         out_payload_tkeep <= m_in_payload_tkeep;
         out_payload_tlast <= m_in_payload_tlast;
         out_payload_tvalid <= m_in_payload_tvalid;

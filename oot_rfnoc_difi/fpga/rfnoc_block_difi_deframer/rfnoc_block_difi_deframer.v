@@ -476,8 +476,14 @@ module rfnoc_block_difi_deframer #(
   //  - PS_FLUSH:  emit the parked final sample with tlast
   //  - PS_DROP:   consume freely, emit nothing
   //  - PS_DRAIN:  no input, no output; waiting to pop the EOB flag
-  assign s_out_payload_tdata  = (pyld_state == PS_FLUSH) ? skid_data :
-                                skid_valid ? skid_data : 32'b0;
+  // DIFI/VITA 49 payload is big-endian on the wire; swap the bytes of each
+  // int16 to recover the CHDR-native sc16 byte order for downstream blocks.
+  function [31:0] swab16(input [31:0] w);
+    swab16 = { w[23:16], w[31:24], w[7:0], w[15:8] };
+  endfunction
+
+  assign s_out_payload_tdata  = swab16((pyld_state == PS_FLUSH) ? skid_data :
+                                       skid_valid ? skid_data : 32'b0);
   assign s_out_payload_tkeep  = 1'b1;
   assign s_out_payload_tlast  = (pyld_state == PS_FLUSH) ? 1'b1 :
                                 (m_in_payload_tlast && pyld_retain);

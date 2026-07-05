@@ -116,6 +116,7 @@ module rfnoc_block_difi_tb;
   end
 
   rfnoc_block_difi #(
+    .CTX_RESEND_CYCLES   (28'hFFFFFFF),
     .THIS_PORTID         (THIS_PORTID),
     .CHDR_W              (CHDR_W),
     .MTU                 (MTU)
@@ -158,6 +159,12 @@ module rfnoc_block_difi_tb;
       return result;
     endfunction : rand_logic
   endclass : Rand
+
+  function [31:0] unpack_word(input [31:0] word);
+    begin
+      unpack_word = { word[23:16], word[31:24], word[7:0], word[15:8] };
+    end
+  endfunction
 
   typedef struct {
     item_t        samples[$];
@@ -267,6 +274,11 @@ module rfnoc_block_difi_tb;
             "Output context packet length didn't match 27 Expected: %d, Received: %d",
             27, packet_context.samples.size());
           `ASSERT_ERROR(27 == packet_context.samples.size(), str);
+          for (int w = 0; w < 27; w++) begin
+            $sformat(str, "Context packet word %0d mismatch: Expected 0x%X, Received 0x%X",
+              w, dut.standard_context_packet_payload[w], packet_context.samples[w]);
+            `ASSERT_ERROR(packet_context.samples[w] == dut.standard_context_packet_payload[w], str);
+          end
         end
 
         repeat (num_packets) begin : recv_process
@@ -297,10 +309,10 @@ module rfnoc_block_difi_tb;
             "Output metadata info didn't match input");
 
           // Verify DIFI data is correct
-          difi_header_out = packet_out.samples[0];
-          difi_streamid_out = packet_out.samples[1];
-          difi_oui_out = packet_out.samples[2];
-          difi_icc_pcc_out = packet_out.samples[3];
+          difi_header_out = unpack_word(packet_out.samples[0]);
+          difi_streamid_out = unpack_word(packet_out.samples[1]);
+          difi_oui_out = unpack_word(packet_out.samples[2]);
+          difi_icc_pcc_out = unpack_word(packet_out.samples[3]);
           difi_int_timestamp_out = packet_out.samples[4];
           difi_frac_timestamp_ms_out = packet_out.samples[5];
           difi_frac_timestamp_ls_out = packet_out.samples[6];
@@ -344,8 +356,10 @@ module rfnoc_block_difi_tb;
           for (int i = 7; i < packet_out.samples.size(); i++) begin
             sc16_t in, out;
 
-            // Grab the input and output samples
+            // Grab the input and output samples. Output samples are
+            // big-endian per DIFI/VITA 49: swap bytes within each int16.
             in = packet_in.samples[i - 7];
+            in = { in[23:16], in[31:24], in[7:0], in[15:8] };
             out = packet_out.samples[i];
 
             // Check that the results match
@@ -435,6 +449,24 @@ module rfnoc_block_difi_tb;
 
       test.start_test("Test back pressure", 1ms);
       test_rand(NUM_PACKETS, SPP, 25, 50);
+      test.end_test();
+
+      test.start_test("Context regs + re-emission on update", 1ms);
+      begin
+        logic [31:0] rb;
+        // Program two context payload words and verify readback
+        blk_ctrl.reg_write(REG_DIFI_STANDARD_CONTEXT_ADDR + 3, 32'hCAFE0003);
+        blk_ctrl.reg_write(REG_DIFI_STANDARD_CONTEXT_ADDR + 26, 32'hCAFE001A);
+        blk_ctrl.reg_read(REG_DIFI_STANDARD_CONTEXT_ADDR + 3, rb);
+        `ASSERT_ERROR(rb == 32'hCAFE0003, "Context payload reg 3 readback failed");
+        blk_ctrl.reg_read(REG_DIFI_STANDARD_CONTEXT_ADDR + 26, rb);
+        `ASSERT_ERROR(rb == 32'hCAFE001A, "Context payload reg 26 readback failed");
+        // The register update must re-arm the context packet: the next data
+        // packet is preceded by a context packet carrying our values
+        // (test_rand verifies the emitted context packet against the DUT's
+        // register file word-for-word)
+        test_rand(1, SPP, STALL_PROB, STALL_PROB, 1);
+      end
       test.end_test();
 
       test.start_test("Test underflow", 1ms);

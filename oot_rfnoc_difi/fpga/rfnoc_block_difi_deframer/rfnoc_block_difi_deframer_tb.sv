@@ -245,7 +245,11 @@ module rfnoc_block_difi_deframer_tb;
           packet_in.samples.push_back(word0);
         end
         for (int i = 0; i < num_samples; i++) begin
-          packet_in.samples.push_back(sample_counter);
+          // Samples are sent big-endian per DIFI; the deframer swaps each
+          // int16 back to CHDR-native order, so expect the logical value.
+          packet_in.samples.push_back(
+            {sample_counter[23:16], sample_counter[31:24],
+             sample_counter[7:0],   sample_counter[15:8]});
           expected_stream.push_back(sample_counter);
           sample_counter++;
         end
