@@ -345,7 +345,7 @@ module rfnoc_block_difi #(
   chdr_difi_timestamp_converter chdr_difi_timestamp_converter_i (
     .clk(axis_data_clk),
     .rst(axis_data_rst),
-    .chdr_timestamp(chdr_timestamp),
+    .chdr_timestamp((state == DIFI_CHDR_TIMESTAMP_ST) ? m_in_context_tdata : chdr_timestamp),
     .tick_period(tick_period),
     .i_tvalid(cdtc_i_tvalid),
     .i_tready(cdtc_i_tready),
@@ -415,6 +415,7 @@ module rfnoc_block_difi #(
       case(state)
         DIFI_MODIFY_CHDR_ST : begin
           if (m_in_context_tvalid && s_out_context_tready) begin
+            chdr_timestamp <= 64'd0;
             if (!sent_context_packet) begin
               state <= DIFI_SEND_CONTEXT_PACKET;
             end else begin
@@ -446,6 +447,7 @@ module rfnoc_block_difi #(
         end
         DIFI_CHDR_TIMESTAMP_ST : begin
           if (m_in_context_tvalid && s_out_context_tready && cdtc_i_tready) begin
+              chdr_timestamp <= m_in_context_tdata;
               if (m_in_context_tlast) begin
                 state <= DIFI_ADD_HEADER_ST;
               end else begin
@@ -485,6 +487,8 @@ module rfnoc_block_difi #(
         end
         DIFI_ADD_FRAC_TS_MS_ST : begin
           if (s_out_payload_tready && (cdtc_frac_timestamp_tvalid || chdr_timestamp == 0)) begin
+            difi_frac_timestamp <= (chdr_timestamp == 0) ? 64'd0 :
+                                   { 32'd0, cdtc_frac_timestamp_tdata[31:0] };
             state <= DIFI_ADD_FRAC_TS_LS_ST;
           end
         end
@@ -541,7 +545,6 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= 1'b0;
         in_payload_tready <= 1'b0;
 
-        chdr_timestamp <= 0;
         cdtc_i_tvalid <= 0;
         cdtc_int_timestamp_tready <= 0;
         cdtc_frac_timestamp_tready <= 0;
@@ -559,7 +562,6 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= 1'b1;
         in_payload_tready <= 1'b0;
 
-        chdr_timestamp <= 0;
         cdtc_i_tvalid <= 0;
         cdtc_int_timestamp_tready <= 0;
         cdtc_frac_timestamp_tready <= 0;
@@ -568,8 +570,8 @@ module rfnoc_block_difi #(
         out_context_tdata <= m_in_context_tdata;
         out_context_tuser <= m_in_context_tuser;
         out_context_tlast <= m_in_context_tlast;
-        out_context_tvalid <= m_in_context_tvalid && (cdtc_i_tready || !chdr_timestamp);
-        in_context_tready <= s_out_context_tready && (cdtc_i_tready || !chdr_timestamp);
+        out_context_tvalid <= m_in_context_tvalid && (cdtc_i_tready || (m_in_context_tdata == 0));
+        in_context_tready <= s_out_context_tready && (cdtc_i_tready || (m_in_context_tdata == 0));
 
         out_payload_tdata <= 32'b0;
         out_payload_tkeep <= 1'b0;
@@ -577,7 +579,6 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= 1'b0;
         in_payload_tready <= 1'b0;
 
-        chdr_timestamp <= m_in_context_tdata;
         cdtc_i_tvalid <= m_in_context_tdata != 0;
         cdtc_int_timestamp_tready <= 0;
         cdtc_frac_timestamp_tready <= 0;
@@ -595,7 +596,6 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= 1'b0;
         in_payload_tready <= 1'b0;
 
-        chdr_timestamp <= chdr_timestamp;
         cdtc_i_tvalid <= 0;
         cdtc_int_timestamp_tready <= 0;
         cdtc_frac_timestamp_tready <= 0;
@@ -613,7 +613,6 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= 1'b1;
         in_payload_tready <= 1'b0;
 
-        chdr_timestamp <= chdr_timestamp;
         cdtc_i_tvalid <= 0;
         cdtc_int_timestamp_tready <= 0;
         cdtc_frac_timestamp_tready <= 0;
@@ -631,7 +630,6 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= 1'b1;
         in_payload_tready <= 1'b0;
 
-        chdr_timestamp <= chdr_timestamp;
         cdtc_i_tvalid <= 0;
         cdtc_int_timestamp_tready <= 0;
         cdtc_frac_timestamp_tready <= 0;
@@ -649,7 +647,6 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= 1'b1;
         in_payload_tready <= 1'b0;
 
-        chdr_timestamp <= chdr_timestamp;
         cdtc_i_tvalid <= 0;
         cdtc_int_timestamp_tready <= 0;
         cdtc_frac_timestamp_tready <= 0;
@@ -667,7 +664,6 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= 1'b1;
         in_payload_tready <= 1'b0;
 
-        chdr_timestamp <= chdr_timestamp;
         cdtc_i_tvalid <= 0;
         cdtc_int_timestamp_tready <= 0;
         cdtc_frac_timestamp_tready <= 0;
@@ -685,7 +681,6 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= (cdtc_int_timestamp_tvalid || !chdr_timestamp);
         in_payload_tready <= 1'b0;
 
-        chdr_timestamp <= chdr_timestamp;
         cdtc_i_tvalid <= 0;
         cdtc_int_timestamp_tready <= chdr_timestamp != 0;
         cdtc_frac_timestamp_tready <= 0;
@@ -703,9 +698,7 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= (cdtc_frac_timestamp_tvalid || !chdr_timestamp);
         in_payload_tready <= 1'b0;
 
-        difi_frac_timestamp <= chdr_timestamp == 0 ? 0 : { cdtc_frac_timestamp_tdata[31:0] };
 
-        chdr_timestamp <= chdr_timestamp;
         cdtc_i_tvalid <= 0;
         cdtc_int_timestamp_tready <= 0;
         cdtc_frac_timestamp_tready <= chdr_timestamp != 0;
@@ -723,7 +716,6 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= 1'b1;
         in_payload_tready <= 1'b0;
 
-        chdr_timestamp <= chdr_timestamp;
         cdtc_i_tvalid <= 0;
         cdtc_int_timestamp_tready <= 0;
         cdtc_frac_timestamp_tready <= 0;
@@ -743,7 +735,6 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= m_in_payload_tvalid;
         in_payload_tready <= s_out_payload_tready;
 
-        chdr_timestamp <= chdr_timestamp;
         cdtc_i_tvalid <= 0;
         cdtc_int_timestamp_tready <= 0;
         cdtc_frac_timestamp_tready <= 0;
@@ -763,7 +754,6 @@ module rfnoc_block_difi #(
         out_payload_tvalid <= 1'b0;
         in_payload_tready <= 1'b0;
 
-        chdr_timestamp <= chdr_timestamp;
         cdtc_i_tvalid <= 0;
         cdtc_int_timestamp_tready <= 0;
         cdtc_frac_timestamp_tready <= 0;
