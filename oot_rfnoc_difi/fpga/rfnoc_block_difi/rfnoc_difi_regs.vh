@@ -7,15 +7,15 @@ localparam REG_DIFI_STREAMID_DEFAULT = 0;
 localparam REG_DIFI_STREAMID_WIDTH = 32;
 
 localparam REG_DIFI_OUI_ADDR = 2;
-localparam REG_DIFI_OUI_DEFAULT = 24'h7c386c;
+localparam REG_DIFI_OUI_DEFAULT = 24'h6A621E; // DIFI Consortium OUI per IEEE-ISTO 4900
 localparam REG_DIFI_OUI_WIDTH = 24;
 
 localparam REG_DIFI_ICC_ADDR = 3;
-localparam REG_DIFI_ICC_DEFAULT = 0;
+localparam REG_DIFI_ICC_DEFAULT = 16'h0000; // DIFI data packet information class
 localparam REG_DIFI_ICC_WIDTH = 16;
 
 localparam REG_DIFI_PCC_ADDR = 4;
-localparam REG_DIFI_PCC_DEFAULT = 0;
+localparam REG_DIFI_PCC_DEFAULT = 16'h0000; // DIFI data packet class
 localparam REG_DIFI_PCC_WIDTH = 16;
 
 localparam REG_DIFI_TICK_PERIOD_MS_ADDR = 5;
